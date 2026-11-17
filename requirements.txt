@@ -1,0 +1,2 @@
+# Runtime dependencies: none (Python standard library only).
+# System requirement: gio from GLib/GIO, and an active GVFS Google Drive mount.

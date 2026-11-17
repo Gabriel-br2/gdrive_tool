@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gdrive-tool"
+version = "0.1.0"
+description = "Stream file transfers to and from Google Drive mounted with GVFS"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=3.6",
+    "pytest>=7.4",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+gdrive = "gdrive_tool.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["gdrive_tool*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+extend-exclude = [".venv", "build", "dist", "*.egg-info"]
+force-exclude = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
