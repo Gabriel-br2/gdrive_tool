@@ -18,6 +18,7 @@ from typing import BinaryIO, Literal
 
 from .exceptions import (
     AmbiguousDuplicateError,
+    GDriveError,
     RemoteNotFoundError,
     TransferError,
 )
@@ -490,15 +491,31 @@ def download(
     progress: ProgressCallback | None = None,
     manager: MountManager | None = None,
 ) -> TransferResult:
-    """Download a Drive-relative path using the package's default engine."""
-    return TransferEngine(manager).download(
-        remote_path,
-        local_path,
-        verify=verify,
-        dry_run=dry_run,
-        on_duplicate=on_duplicate,
-        progress=progress,
+    """Download a Drive file; report expected I/O failures without raising."""
+    source_label = remote_path
+    destination_label = (
+        str(local_path)
+        if local_path is not None
+        else str(Path.cwd() / Path(remote_path).name)
     )
+    try:
+        return TransferEngine(manager).download(
+            remote_path,
+            local_path,
+            verify=verify,
+            dry_run=dry_run,
+            on_duplicate=on_duplicate,
+            progress=progress,
+        )
+    except (GDriveError, OSError) as error:
+        print(f"Download failed; continuing: {error}", file=sys.stderr)
+        return TransferResult(
+            source=source_label,
+            destination=destination_label,
+            bytes_transferred=0,
+            success=False,
+            error=str(error),
+        )
 
 
 def upload(
@@ -511,15 +528,27 @@ def upload(
     progress: ProgressCallback | None = None,
     manager: MountManager | None = None,
 ) -> TransferResult:
-    """Upload a local file using the package's default engine."""
-    return TransferEngine(manager).upload(
-        local_path,
-        remote_path,
-        verify=verify,
-        dry_run=dry_run,
-        on_duplicate=on_duplicate,
-        progress=progress,
-    )
+    """Upload a local file; report expected I/O failures without raising."""
+    source_label = str(local_path)
+    destination_label = remote_path or Path(local_path).name
+    try:
+        return TransferEngine(manager).upload(
+            local_path,
+            remote_path,
+            verify=verify,
+            dry_run=dry_run,
+            on_duplicate=on_duplicate,
+            progress=progress,
+        )
+    except (GDriveError, OSError) as error:
+        print(f"Upload failed; continuing: {error}", file=sys.stderr)
+        return TransferResult(
+            source=source_label,
+            destination=destination_label,
+            bytes_transferred=0,
+            success=False,
+            error=str(error),
+        )
 
 
 def load_file(
@@ -529,8 +558,8 @@ def load_file(
     verify: bool = False,
     on_duplicate: DuplicatePolicy = "skip",
     manager: MountManager | None = None,
-) -> Path:
-    """Download a Drive file for use by Python and return its local path."""
+) -> Path | None:
+    """Download a file and return its local path, or ``None`` after an I/O failure."""
     result = download(
         remote_path,
         local_path,
@@ -538,4 +567,4 @@ def load_file(
         on_duplicate=on_duplicate,
         manager=manager,
     )
-    return Path(result.destination)
+    return Path(result.destination) if result.success else None

@@ -57,6 +57,8 @@ class TransferResult:
     sha256: str | None = None
     skipped: bool = False
     dry_run: bool = False
+    success: bool = True
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

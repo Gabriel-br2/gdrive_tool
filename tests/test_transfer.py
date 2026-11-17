@@ -10,10 +10,17 @@ from pathlib import Path
 
 import pytest
 
-from gdrive_tool.exceptions import TransferError
+from gdrive_tool.exceptions import MountNotFoundError, TransferError
 from gdrive_tool.models import AppConfig, TransferProgress
 from gdrive_tool.mount import MountManager, with_gvfs_retry
-from gdrive_tool.transfer import TransferEngine, atomic_remote_write, iter_chunks
+from gdrive_tool.transfer import (
+    TransferEngine,
+    atomic_remote_write,
+    download,
+    iter_chunks,
+    load_file,
+    upload,
+)
 
 
 def make_engine(tmp_path: Path, chunk_size: int = 4) -> tuple[TransferEngine, Path]:
@@ -207,3 +214,61 @@ def test_retry_reconnects_after_transient_disconnect() -> None:
     assert operation.run() == "complete"
     assert operation.attempts == 2
     assert operation.reconnections == 1
+
+
+def test_public_download_reports_missing_mount_without_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manager = MountManager(AppConfig())
+
+    def missing_mount(path: str) -> None:
+        raise MountNotFoundError("Drive is not mounted")
+
+    monkeypatch.setattr(manager, "resolve", missing_mount)
+    result = download("report.txt", tmp_path / "report.txt", manager=manager)
+
+    assert not result.success
+    assert result.error == "Drive is not mounted"
+    assert "Download failed; continuing" in capsys.readouterr().err
+
+
+def test_public_upload_reports_missing_mount_without_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manager = MountManager(AppConfig())
+
+    def missing_mount(path: str) -> None:
+        raise MountNotFoundError("Drive is not mounted")
+
+    monkeypatch.setattr(manager, "resolve", missing_mount)
+    local_path = tmp_path / "report.txt"
+    local_path.write_text("test data", encoding="utf-8")
+
+    result = upload(local_path, "report.txt", manager=manager)
+
+    assert not result.success
+    assert result.error == "Drive is not mounted"
+    assert "Upload failed; continuing" in capsys.readouterr().err
+
+
+def test_load_file_returns_none_when_mount_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manager = MountManager(AppConfig())
+
+    def missing_mount(path: str) -> None:
+        raise MountNotFoundError("Drive is not mounted")
+
+    monkeypatch.setattr(manager, "resolve", missing_mount)
+    local_path = tmp_path / "report.txt"
+
+    result = load_file("report.txt", local_path, manager=manager)
+
+    assert result is None
+    assert "Download failed; continuing" in capsys.readouterr().err

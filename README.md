@@ -58,7 +58,20 @@ original filename.
 
 `verify=True` checks the copied file's size and SHA-256 hash. The returned
 `TransferResult` includes the number of bytes transferred, the hash, and
-whether the operation was skipped or simulated.
+whether the operation succeeded, was skipped, or was simulated. The public
+`upload` and `download` functions print expected I/O failures to stderr and
+return a result with `success=False` and an `error` message instead of raising.
+`load_file` returns `None` if the download fails, so callers can keep running:
+
+```python
+local_file = load_file("Projects/report.pdf")
+if local_file is None:
+    print("The file is unavailable; continuing with the next task.")
+else:
+    process_file(local_file)
+```
+
+Unexpected programming errors are not swallowed.
 
 ## Command-line interface
 
