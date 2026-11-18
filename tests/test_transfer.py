@@ -15,7 +15,6 @@ from gdrive_tool.models import AppConfig, TransferProgress
 from gdrive_tool.mount import MountManager, with_gvfs_retry
 from gdrive_tool.transfer import (
     TransferEngine,
-    atomic_remote_write,
     download,
     iter_chunks,
     load_file,
@@ -73,7 +72,7 @@ def test_iter_chunks_rejects_non_positive_chunk_size() -> None:
         list(iter_chunks(BytesIO(b"data"), 0))
 
 
-def test_upload_writes_atomically_and_verifies_hash(
+def test_upload_writes_and_verifies_hash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     engine, drive_root = make_engine(tmp_path)
@@ -88,7 +87,6 @@ def test_upload_writes_atomically_and_verifies_hash(
     assert destination.read_bytes() == payload
     assert result.bytes_transferred == len(payload)
     assert result.sha256 == hashlib.sha256(payload).hexdigest()
-    assert not (destination.parent / ".source.bin.part").exists()
 
 
 def test_download_verifies_copy_and_preserves_local_mtime(
@@ -151,7 +149,6 @@ def test_upload_overwrites_only_when_requested(
 
     assert not result.skipped
     assert existing.read_bytes() == b"replacement"
-    assert not (remote_dir / ".report.txt.part").exists()
 
 
 def test_upload_rejects_empty_google_native_placeholders(tmp_path: Path) -> None:
@@ -163,7 +160,7 @@ def test_upload_rejects_empty_google_native_placeholders(tmp_path: Path) -> None
         engine.upload(empty_file)
 
 
-def test_failed_transfer_removes_partial_file(
+def test_failed_transfer_removes_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     engine, drive_root = make_engine(tmp_path)
@@ -177,21 +174,7 @@ def test_failed_transfer_removes_partial_file(
     with pytest.raises(RuntimeError, match="simulated failure"):
         engine.upload(local_file, "source.bin", progress=fail_progress)
 
-    assert not (drive_root / ".source.bin.part").exists()
     assert not (drive_root / "source.bin").exists()
-
-
-def test_atomic_remote_write_cleans_part_on_exception(tmp_path: Path) -> None:
-    target = tmp_path / "final.bin"
-    part = tmp_path / ".final.bin.part"
-
-    with pytest.raises(RuntimeError, match="abort"):
-        with atomic_remote_write(target) as part_path:
-            part_path.write_bytes(b"incomplete")
-            raise RuntimeError("abort")
-
-    assert not part.exists()
-    assert not target.exists()
 
 
 def test_retry_reconnects_after_transient_disconnect() -> None:

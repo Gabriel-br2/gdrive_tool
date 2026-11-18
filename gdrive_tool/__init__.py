@@ -13,7 +13,6 @@ from .mount import MountManager, resolve_path, with_gvfs_retry
 from .transfer import (
     DuplicatePolicy,
     TransferEngine,
-    atomic_remote_write,
     download,
     iter_chunks,
     load_file,
@@ -35,7 +34,6 @@ __all__ = [
     "TransferEngine",
     "TransferProgress",
     "TransferResult",
-    "atomic_remote_write",
     "doctor",
     "download",
     "iter_chunks",

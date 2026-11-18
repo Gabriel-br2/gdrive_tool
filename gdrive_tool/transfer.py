@@ -12,7 +12,6 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Literal
 
@@ -49,59 +48,8 @@ def iter_chunks(file_obj: BinaryIO, chunk_size: int = CHUNK_SIZE) -> Iterator[by
         yield chunk
 
 
-@contextmanager
-def atomic_remote_write(
-    target: Path,
-    *,
-    replace: Callable[[Path, Path], None] | None = None,
-) -> Iterator[Path]:
-    """Write to a sibling .part file and rename it only after success."""
-    part_path = target.with_name(f".{target.name}.part")
-    try:
-        part_path.unlink(missing_ok=True)
-        yield part_path
-        if replace is None:
-            part_path.replace(target)
-        else:
-            replace(part_path, target)
-    except BaseException:
-        try:
-            part_path.unlink(missing_ok=True)
-        except OSError as cleanup_error:
-            LOGGER.warning(
-                "Could not remove partial file %s: %s", part_path, cleanup_error
-            )
-        raise
-
-
-@contextmanager
-def _atomic_local_write(
-    target: Path,
-    *,
-    replace: Callable[[Path, Path], None] | None = None,
-) -> Iterator[Path]:
-    """Create a local sibling temporary file and atomically replace the target."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    part_path = target.with_name(f".{target.name}.part")
-    try:
-        part_path.unlink(missing_ok=True)
-        yield part_path
-        if replace is None:
-            part_path.replace(target)
-        else:
-            replace(part_path, target)
-    except BaseException:
-        try:
-            part_path.unlink(missing_ok=True)
-        except OSError as cleanup_error:
-            LOGGER.warning(
-                "Could not remove partial file %s: %s", part_path, cleanup_error
-            )
-        raise
-
-
 class TransferEngine:
-    """Perform atomic, retried file transfers through a selected GVFS mount."""
+    """Perform retried file transfers through a selected GVFS mount."""
 
     def __init__(
         self,
@@ -154,18 +102,18 @@ class TransferEngine:
         return result
 
     @with_gvfs_retry(attempts=3, initial_delay=0.5)
-    def _copy_to_part(
+    def _copy_file(
         self,
         source: Path,
-        part_path: Path,
+        destination: Path,
         total_bytes: int,
         progress: ProgressCallback | None,
     ) -> tuple[int, str]:
-        """Copy and hash a file in one pass, restarting from byte zero on retry."""
+        """Copy and hash a file in one pass."""
         digest = hashlib.sha256()
         copied = 0
         started = time.monotonic()
-        with source.open("rb") as source_file, part_path.open("wb") as target_file:
+        with source.open("rb") as source_file, destination.open("wb") as target_file:
             for chunk in iter_chunks(source_file, self.chunk_size):
                 target_file.write(chunk)
                 digest.update(chunk)
@@ -188,11 +136,6 @@ class TransferEngine:
                 f"Source size changed during transfer: expected {total_bytes}, copied {copied}"
             )
         return copied, digest.hexdigest()
-
-    @with_gvfs_retry(attempts=3, initial_delay=0.5)
-    def _replace(self, source: Path, destination: Path) -> None:
-        """Commit a completed sibling .part file using the filesystem rename."""
-        source.replace(destination)
 
     @with_gvfs_retry(attempts=3, initial_delay=0.5)
     def _sha256_file(self, path: Path) -> tuple[int, str]:
@@ -338,7 +281,7 @@ class TransferEngine:
         on_duplicate: DuplicatePolicy = "skip",
         progress: ProgressCallback | None = None,
     ) -> TransferResult:
-        """Download one virtual Drive file to a local path atomically."""
+        """Download one virtual Drive file to a local path."""
         resolved = self.manager.resolve(remote_path)
         source = resolved.local_path
         destination = (
@@ -382,14 +325,18 @@ class TransferEngine:
                         raise RuntimeError("duplicate policy was not resolved")
             if dry_run:
                 return TransferResult(remote_path, str(destination), 0, dry_run=True)
-            with _atomic_local_write(destination, replace=self._replace) as part_path:
-                copied, digest = self._copy_to_part(source, part_path, size, progress)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                copied, digest = self._copy_file(source, destination, size, progress)
                 if mtime is not None:
-                    os.utime(part_path, (mtime, mtime))
+                    os.utime(destination, (mtime, mtime))
                 if verify:
-                    verified_size, verified_digest = self._sha256_file(part_path)
+                    verified_size, verified_digest = self._sha256_file(destination)
                     if verified_size != size or verified_digest != digest:
                         raise TransferError(f"Verification failed for {remote_path}")
+            except BaseException:
+                destination.unlink(missing_ok=True)
+                raise
             return TransferResult(
                 remote_path,
                 str(destination),
@@ -413,7 +360,7 @@ class TransferEngine:
         on_duplicate: DuplicatePolicy = "skip",
         progress: ProgressCallback | None = None,
     ) -> TransferResult:
-        """Upload one local file to the Drive mount using a .part file."""
+        """Upload one local file to the Drive mount."""
         source = Path(local_path)
         target_virtual = remote_path if remote_path is not None else source.name
         resolved = self.manager.resolve(target_virtual)
@@ -458,17 +405,20 @@ class TransferEngine:
                         raise RuntimeError("duplicate policy was not resolved")
             if dry_run:
                 return TransferResult(str(source), target_virtual, 0, dry_run=True)
-            with atomic_remote_write(destination, replace=self._replace) as part_path:
-                copied, digest = self._copy_to_part(
-                    source, part_path, source_stat.st_size, progress
+            try:
+                copied, digest = self._copy_file(
+                    source, destination, source_stat.st_size, progress
                 )
                 if verify:
-                    verified_size, verified_digest = self._sha256_file(part_path)
+                    verified_size, verified_digest = self._sha256_file(destination)
                     if (
                         verified_size != source_stat.st_size
                         or verified_digest != digest
                     ):
                         raise TransferError(f"Verification failed for {target_virtual}")
+            except BaseException:
+                destination.unlink(missing_ok=True)
+                raise
             return TransferResult(
                 str(source),
                 target_virtual,

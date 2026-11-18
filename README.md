@@ -41,6 +41,14 @@ upload_result = upload(
     verify=True,
 )
 
+# Replaces the existing Drive file at this path with the new local file.
+replacement_result = upload(
+    Path.home() / "Documents" / "report-updated.pdf",
+    "Projects/report.pdf",
+    on_duplicate="overwrite",
+    verify=True,
+)
+
 download_result = download(
     "Projects/report.pdf",
     Path.home() / "Downloads" / "report.pdf",
@@ -78,21 +86,24 @@ Unexpected programming errors are not swallowed.
 ```bash
 gdrive doctor
 gdrive upload ./report.pdf Projects/report.pdf --verify
+gdrive upload ./report-updated.pdf Projects/report.pdf --on-duplicate overwrite --verify
 gdrive download Projects/report.pdf ./downloaded-report.pdf --verify
 ```
 
 The default duplicate policy is `skip`. Use `--on-duplicate rename`,
-`overwrite`, or `ask` to choose another behavior. `--dry-run` simulates the
-operation, and `--json` emits structured output.
+`overwrite`, or `ask` to choose another behavior. `overwrite` replaces the file
+at the destination with the uploaded version; the new contents are written
+before the destination is replaced. `--dry-run` simulates the operation, and
+`--json` emits structured output.
 
 ## Transfers and GVFS limitations
 
 - Files are streamed in chunks, with progress displayed by the CLI.
 - Transient connection failures are retried with exponential backoff.
-- Data is written to a sibling `.part` file and renamed after a successful
-  transfer. Failed transfers clean up the temporary file when the mount permits.
+- Data is written directly to the destination file. Failed transfers remove
+  the incomplete destination when the mount permits.
 - SHA-256 is calculated while reading the source. `--verify` also reads the
-  temporary file to validate the completed copy.
+  destination to validate the completed copy.
 - Downloads restore the source modification time on the local filesystem.
   Uploads do not change remote metadata with `chmod` or `utime`.
 - The package transfers individual files. It does not copy directories or
