@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import BinaryIO, Literal
+from urllib.parse import quote
 
 from .exceptions import (
     AmbiguousDuplicateError,
@@ -70,12 +71,13 @@ class TransferEngine:
     def _run_gio(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         """Run GIO and map connection or command failures to domain errors."""
         try:
+            timeout = None if arguments and arguments[0] == "copy" else 60
             result = subprocess.run(
                 ["gio", *arguments],
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=timeout,
             )
         except (OSError, subprocess.SubprocessError) as error:
             if isinstance(error, OSError) and error.errno in {
@@ -160,21 +162,66 @@ class TransferEngine:
 
     def _remote_names(self, directory: Path) -> set[str]:
         """Read names from one remote directory listing."""
-        result = self._run_gio("list", "-a", "standard::name", str(directory))
+        result = self._run_gio(
+            "list", "-a", "standard::name,standard::display-name", str(directory)
+        )
         names: set[str] = set()
         for line in result.stdout.splitlines():
             fields = line.split("\t")
-            name = fields[0].strip()
+            display_name = next(
+                (
+                    field.partition("=")[2].strip()
+                    for field in fields
+                    if field.startswith("standard::display-name=")
+                ),
+                "",
+            )
+            name = display_name or fields[0].strip()
             if name:
                 names.add(name)
         return names
 
     def _ensure_remote_directory(self, directory: Path) -> None:
         """Create missing parent directories through GIO."""
+        self.manager.mountpoint or self.manager.ensure_mounted()
+        drive_root = self.manager.drive_root or self.manager.mountpoint
+        if drive_root is None:
+            raise TransferError("Could not determine the selected Drive root")
         try:
-            self._run_gio("info", str(directory))
-        except RemoteNotFoundError:
-            self._run_gio("mkdir", "-p", str(directory))
+            relative = directory.relative_to(drive_root)
+        except ValueError as error:
+            raise TransferError(
+                f"Remote directory escapes the selected Drive mount: {directory}"
+            ) from error
+        current = drive_root
+        for part in relative.parts:
+            current = current / part
+            try:
+                self._run_gio("info", str(current))
+            except RemoteNotFoundError:
+                try:
+                    self._run_gio("mkdir", str(current))
+                except TransferError as error:
+                    raise TransferError(
+                        f"Remote directory does not exist and GVFS could not create "
+                        f"it: {current}"
+                    ) from error
+
+    def _remote_uri(self, path: Path) -> str:
+        """Build a GIO URI for a path below the selected Drive root."""
+        self.manager.mountpoint or self.manager.ensure_mounted()
+        drive_root = self.manager.drive_root or self.manager.mountpoint
+        drive_uri = self.manager.drive_uri or self.manager.mount_uri
+        if drive_root is None or not drive_uri:
+            raise TransferError("Could not determine the selected Drive's GIO URI")
+        try:
+            relative = path.relative_to(drive_root).as_posix()
+        except ValueError as error:
+            raise TransferError(
+                f"Remote path escapes the selected Drive mount: {path}"
+            ) from error
+        encoded = quote(relative, safe="/")
+        return f"{drive_uri.rstrip('/')}/{encoded}"
 
     @staticmethod
     def _remote_size(metadata: dict[str, str], path: Path) -> int:
@@ -405,24 +452,34 @@ class TransferEngine:
                         raise RuntimeError("duplicate policy was not resolved")
             if dry_run:
                 return TransferResult(str(source), target_virtual, 0, dry_run=True)
-            try:
-                copied, digest = self._copy_file(
-                    source, destination, source_stat.st_size, progress
+            source_size, digest = self._sha256_file(source)
+            if source_size != source_stat.st_size:
+                raise TransferError(
+                    f"Source size changed during transfer: expected "
+                    f"{source_stat.st_size}, read {source_size}"
                 )
-                if verify:
-                    verified_size, verified_digest = self._sha256_file(destination)
-                    if (
-                        verified_size != source_stat.st_size
-                        or verified_digest != digest
-                    ):
-                        raise TransferError(f"Verification failed for {target_virtual}")
-            except BaseException:
-                destination.unlink(missing_ok=True)
-                raise
+            destination_uri = self._remote_uri(destination)
+            copy_arguments = ["copy", "-T"]
+            started = time.monotonic()
+            self._run_gio(*copy_arguments, str(source), destination_uri)
+            if verify:
+                verified_size, verified_digest = self._sha256_file(destination)
+                if verified_size != source_stat.st_size or verified_digest != digest:
+                    raise TransferError(f"Verification failed for {target_virtual}")
+            if progress is not None:
+                elapsed = max(time.monotonic() - started, 0.000001)
+                progress(
+                    TransferProgress(
+                        bytes_transferred=source_size,
+                        total_bytes=source_size,
+                        bytes_per_second=source_size / elapsed,
+                        eta_seconds=0,
+                    )
+                )
             return TransferResult(
                 str(source),
                 target_virtual,
-                copied,
+                source_size,
                 sha256=digest,
             )
         except (RemoteNotFoundError, TransferError, AmbiguousDuplicateError):

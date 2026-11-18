@@ -12,7 +12,7 @@ from collections.abc import Callable
 from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import ParamSpec, TypeVar, overload
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from .config import load_config, save_config
 from .exceptions import InvalidPathError, MountNotFoundError
@@ -104,6 +104,8 @@ class MountManager:
         self.config_path = config_path
         self.mountpoint: Path | None = None
         self.mount_uri: str | None = None
+        self.drive_root: Path | None = None
+        self.drive_uri: str | None = None
         self.account: str | None = None
 
     @staticmethod
@@ -232,6 +234,7 @@ class MountManager:
         """Locate and select the mounted Drive, raising if none is available."""
         mounts = self.discover()
         self.mountpoint = self._select_mount(mounts, interactive=interactive)
+        self.mount_uri = None
         for mountpoint, root in self._gio_mount_records():
             if mountpoint == self.mountpoint:
                 self.mount_uri = root
@@ -247,7 +250,51 @@ class MountManager:
                 if len(uris) == 1 and len(self.discover()) == 1:
                     self.mount_uri = uris[0]
         self.account = self.mountpoint.name
+        self.drive_root = self.mountpoint
+        self.drive_uri = self.mount_uri
+        if self.mount_uri is not None:
+            root_name = self._writable_drive_root(self.mount_uri)
+            self.drive_root = self.mountpoint / root_name
+            self.drive_uri = f"{self.mount_uri.rstrip('/')}/{quote(root_name)}"
         return self.mountpoint
+
+    @staticmethod
+    def _writable_drive_root(mount_uri: str) -> str:
+        """Find the writable My Drive directory beneath GVFS's read-only root."""
+        try:
+            result = subprocess.run(
+                [
+                    "gio",
+                    "list",
+                    "-a",
+                    "standard::name,access::can-write",
+                    mount_uri,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise MountNotFoundError(
+                f"Could not inspect the Google Drive root: {error}"
+            ) from error
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise MountNotFoundError(
+                f"Could not inspect the Google Drive root: {detail}"
+            )
+        writable = [
+            line.split("\t", maxsplit=1)[0].strip()
+            for line in result.stdout.splitlines()
+            if "access::can-write=TRUE" in line
+        ]
+        if len(writable) != 1:
+            raise MountNotFoundError(
+                "Could not uniquely identify the writable My Drive directory "
+                f"under {mount_uri}"
+            )
+        return writable[0]
 
     def reconnect(self) -> None:
         """Ask GIO to reconnect the selected mount when possible."""
@@ -281,6 +328,7 @@ class MountManager:
     def resolve(self, value: str, *, interactive: bool = False) -> ResolvedPath:
         """Resolve relative, shortcut, or Google Drive URI paths."""
         mountpoint = self.mountpoint or self.ensure_mounted(interactive=interactive)
+        drive_root = self.drive_root or mountpoint
         original = value
         account: str | None = self.account
         if value.startswith("@"):
@@ -297,13 +345,20 @@ class MountManager:
                     f"URI account {uri_account!r} is not the selected mounted account"
                 )
             account = uri_account or account
-            relative = unquote(parsed.path).lstrip("/")
+            uri_path = unquote(parsed.path)
+            if self.drive_uri:
+                drive_uri_path = urlparse(self.drive_uri).path.rstrip("/")
+                if uri_path == drive_uri_path:
+                    uri_path = ""
+                elif uri_path.startswith(f"{drive_uri_path}/"):
+                    uri_path = uri_path[len(drive_uri_path) :]
+            relative = uri_path.lstrip("/")
         else:
             relative = value
         virtual = self._validate_relative(relative)
-        local_path = mountpoint.joinpath(*virtual.parts)
+        local_path = drive_root.joinpath(*virtual.parts)
         try:
-            local_path.relative_to(mountpoint)
+            local_path.relative_to(drive_root)
         except ValueError as error:
             raise InvalidPathError(
                 f"Path escapes the Drive mount: {original!r}"
@@ -337,7 +392,7 @@ class MountManager:
             report["selection_required"] = True
             return report
         selected = self.ensure_mounted()
-        report["selected"] = str(selected)
+        report["selected"] = str(self.drive_root or selected)
         report["account"] = self.account
         if remount:
             self.reconnect()

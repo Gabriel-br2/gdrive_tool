@@ -5,12 +5,19 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import shutil
+import subprocess
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import pytest
 
-from gdrive_tool.exceptions import MountNotFoundError, TransferError
+from gdrive_tool.exceptions import (
+    MountNotFoundError,
+    RemoteNotFoundError,
+    TransferError,
+)
 from gdrive_tool.models import AppConfig, TransferProgress
 from gdrive_tool.mount import MountManager, with_gvfs_retry
 from gdrive_tool.transfer import (
@@ -28,6 +35,7 @@ def make_engine(tmp_path: Path, chunk_size: int = 4) -> tuple[TransferEngine, Pa
     drive_root.mkdir()
     manager = MountManager(AppConfig())
     manager.mountpoint = drive_root
+    manager.mount_uri = "google-drive://test-account/"
     manager.account = "test-account"
     return TransferEngine(manager, chunk_size=chunk_size), drive_root
 
@@ -47,6 +55,23 @@ def use_fake_directory_listing(
         "_remote_names",
         lambda path: {child.name for child in path.iterdir()},
     )
+
+    def fake_run_gio(*arguments: str) -> object:
+        if arguments[0] == "copy":
+            source = Path(arguments[-2])
+            destination_uri = urlparse(arguments[-1])
+            destination = engine.manager.mountpoint / unquote(
+                destination_uri.path.lstrip("/")
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if "--backup" in arguments and destination.exists():
+                shutil.copyfile(
+                    destination, destination.with_name(destination.name + "~")
+                )
+            shutil.copyfile(source, destination)
+        return object()
+
+    monkeypatch.setattr(engine, "_run_gio", fake_run_gio)
 
 
 def metadata_for(
@@ -87,6 +112,89 @@ def test_upload_writes_and_verifies_hash(
     assert destination.read_bytes() == payload
     assert result.bytes_transferred == len(payload)
     assert result.sha256 == hashlib.sha256(payload).hexdigest()
+
+
+def test_ensure_remote_directory_creates_each_missing_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine, drive_root = make_engine(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run_gio(*arguments: str) -> object:
+        calls.append(arguments)
+        if arguments[0] == "info":
+            raise RemoteNotFoundError("missing")
+        return object()
+
+    monkeypatch.setattr(engine, "_run_gio", fake_run_gio)
+
+    engine._ensure_remote_directory(drive_root / "Projects" / "Mestrado")
+
+    assert calls == [
+        ("info", str(drive_root / "Projects")),
+        ("mkdir", str(drive_root / "Projects")),
+        ("info", str(drive_root / "Projects" / "Mestrado")),
+        ("mkdir", str(drive_root / "Projects" / "Mestrado")),
+    ]
+
+
+def test_mount_manager_selects_writable_drive_folder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "gdrive_tool.mount.subprocess.run",
+        lambda *arguments, **kwargs: subprocess.CompletedProcess(
+            arguments,
+            0,
+            stdout=(
+                "GVfsSharedWithMe\t0\t(directory)\taccess::can-write=FALSE\n"
+                "drive-folder-id\t0\t(directory)\taccess::can-write=TRUE\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    assert MountManager._writable_drive_root("google-drive://test-account/") == (
+        "drive-folder-id"
+    )
+
+
+def test_mount_manager_resolves_paths_from_drive_folder(tmp_path: Path) -> None:
+    manager = MountManager(AppConfig())
+    manager.mountpoint = tmp_path / "mount"
+    manager.drive_root = manager.mountpoint / "drive-folder-id"
+    manager.mount_uri = "google-drive://test-account/"
+    manager.drive_uri = "google-drive://test-account/drive-folder-id"
+    manager.account = "test-account"
+
+    resolved = manager.resolve("reports/report.csv")
+    uri_resolved = manager.resolve(
+        "google-drive://test-account/drive-folder-id/reports/report.csv"
+    )
+
+    assert resolved.local_path == manager.drive_root / "reports" / "report.csv"
+    assert uri_resolved.local_path == resolved.local_path
+
+
+def test_remote_names_uses_display_names_in_gio_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine, drive_root = make_engine(tmp_path)
+    monkeypatch.setattr(
+        engine,
+        "_run_gio",
+        lambda *arguments: subprocess.CompletedProcess(
+            arguments,
+            0,
+            stdout=(
+                "file-id\t24\t(regular)\t"
+                "standard::display-name=report with spaces.csv\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    assert engine._remote_names(drive_root) == {"report with spaces.csv"}
 
 
 def test_download_verifies_copy_and_preserves_local_mtime(
@@ -160,7 +268,7 @@ def test_upload_rejects_empty_google_native_placeholders(tmp_path: Path) -> None
         engine.upload(empty_file)
 
 
-def test_failed_transfer_removes_destination(
+def test_upload_callback_failure_occurs_after_gio_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     engine, drive_root = make_engine(tmp_path)
@@ -174,7 +282,7 @@ def test_failed_transfer_removes_destination(
     with pytest.raises(RuntimeError, match="simulated failure"):
         engine.upload(local_file, "source.bin", progress=fail_progress)
 
-    assert not (drive_root / "source.bin").exists()
+    assert (drive_root / "source.bin").read_bytes() == local_file.read_bytes()
 
 
 def test_retry_reconnects_after_transient_disconnect() -> None:

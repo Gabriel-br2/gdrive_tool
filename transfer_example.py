@@ -8,22 +8,23 @@ from gdrive_tool import download, upload
 def download_example() -> None:
     """Download a Drive file into the user's Downloads directory."""
     result = download(
-        "Projects/mainUse.ipynb",
-        Path.home() / "Downloads" / "mainUse.ipynb",
+        remote_path="test.csv",
+        local_path="test.csv",
         verify=True,
     )
     print(result)
 
 
 def upload_example() -> None:
-    """Upload a local file to the Drive's Projects directory."""
+    """Upload a local file to the Drive root."""
     result = upload(
-        Path.home() / "Documents" / "report.txt",
-        "Projects/report.txt",
+        local_path="test.csv",
+        remote_path="test.csv",
+        on_duplicate="overwrite",
         verify=True,
     )
     print(result)
 
 
 if __name__ == "__main__":
-    download_example()
+    upload_example()
