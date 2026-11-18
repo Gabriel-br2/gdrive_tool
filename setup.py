@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="gdrive_tool",
-    version="1.0.1",
+    version="1.0.2",
     packages=find_packages(),
     author="Gabriel Rocha de Souza",
     author_email="souza.gabriel.0210@gmail.com",
