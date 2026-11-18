@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gdrive-tool"
-version = "1.0.1"
+version = "1.0.2"
 description = "Stream file transfers to and from Google Drive mounted with GVFS"
 requires-python = ">=3.11"
 dependencies = []
